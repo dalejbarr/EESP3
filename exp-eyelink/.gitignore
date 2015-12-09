@@ -1,0 +1,9 @@
+*.[oa]
+/src/expdebug2
+/src/exp2
+/src/expeyelink
+/src/win32/*
+/bin/
+/tests/*/response
+*~
+/tools/audioprobe

@@ -1,0 +1,1005 @@
+#+TITLE: episodic encoding in speech production (EESP3)
+#+PROPERTY: header-args:php :noweb yes
+
+* System Requirements for the analysis
+
+- =php5-cli=
+- =php5-sqlite=
+- =php5-gd=
+- =imagemagick=
+
+#+BEGIN_SRC R :exports results :results output
+  library("funfact")
+  library("RSQLite")
+  library("dplyr")
+  library("tidyr")
+
+  sessionInfo()
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+R version 3.2.1 (2015-06-18)
+Platform: x86_64-unknown-linux-gnu (64-bit)
+Running under: Ubuntu 14.04.3 LTS
+
+locale:
+ [1] LC_CTYPE=en_GB.UTF-8       LC_NUMERIC=C              
+ [3] LC_TIME=en_GB.UTF-8        LC_COLLATE=en_GB.UTF-8    
+ [5] LC_MONETARY=en_GB.UTF-8    LC_MESSAGES=en_GB.UTF-8   
+ [7] LC_PAPER=en_GB.UTF-8       LC_NAME=C                 
+ [9] LC_ADDRESS=C               LC_TELEPHONE=C            
+[11] LC_MEASUREMENT=en_GB.UTF-8 LC_IDENTIFICATION=C       
+
+attached base packages:
+[1] stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+[1] tidyr_0.3.0      dplyr_0.4.3      RSQLite_1.0.9000 funfact_0.151   
+
+loaded via a namespace (and not attached):
+[1] MASS_7.3-40             magrittr_1.5            R6_2.1.1               
+[4] assertthat_0.1          parallel_3.2.1          tools_3.2.1            
+[7] DBI_0.3.1.9008          clusterGeneration_1.3.4 Rcpp_0.12.1            
+#+end_example
+
+
+* Initialize experiment
+** Get information
+
+#+BEGIN_SRC R
+  library("RSQLite")
+  library("dplyr")
+
+  filler_img <- list.files("experiment_stimuli/Filler_items")
+
+  con <- dbConnect(SQLite(), "EESP2.db")
+
+  sessgrid <- dbReadTable(con, "SessionGrids")
+
+  sessgrid %>%
+      filter(Who == "D") %>%
+      count(SessionID, BlockID, ItemID) %>%
+      ungroup() %>%
+      group_by(n) %>% summarize(f = n())
+  ## so, 7, 8, 9, 10 total
+  ## which means 6-9 training trials and 1 test
+#+END_SRC
+
+** Build up the trials
+
+#+BEGIN_SRC R
+  library("dplyr")
+  library("RSQLite")
+
+  con <- dbConnect(SQLite(), dbname = "EESP2.db")
+
+  aois <- list.files("resource", "\\.bmp$") %>%
+      setdiff(c("grid.bmp", "highlight.bmp"))
+
+  targ_ix <- grep("_P\\.bmp$", aois)
+  foil_ix <- grep("_A\\.bmp$", aois)
+  fix <- seq_along(aois) %>% setdiff(c(targ_ix, foil_ix))
+  fnames <- paste0("F", seq_along(fix))
+  nvec <- vector("character", length(aois))
+  nvec[fix] <- fnames
+  nvec[targ_ix] <- "TARGET"
+  nvec[foil_ix] <- "FOIL"
+
+  aoi <- data_frame(AOIID = NA_integer_,
+                    Link = 'itemcell',
+                    ID = 1L,
+                    Name = nvec,
+                    Resource = aois,
+                    x1 = NA_integer_,
+                    y1 = NA_integer_,
+                    Layer = 4);
+
+  locs <- sample(1:20, length(aois))
+
+  rows <- floor((locs - 1) / 5) + 1
+  cols <- (locs - 1) %% 5 + 1
+
+  org <- c(x = (1024 - (180 * 5 + 6 * 2)) / 2,
+           y = (768 - (180 * 4 + 5 * 2)) / 2)
+
+  aoi2 <- aoi %>%
+      mutate(x1 = org["x"] + (cols - 1) * 182,
+             y1 = org["y"] + (rows - 1) * 182,
+             AOIID = row_number())
+
+#+END_SRC
+
+** Draw a grid
+
+#+BEGIN_SRC php :tangle scripts/grid.php
+  <?php
+  $celldim = 180;
+  $bord = 2;
+
+  $width = $celldim * 5 + $bord * 6;
+  $height = $celldim * 4 + $bord * 5;
+
+  $im = imagecreatetruecolor($width, $height);
+  $bg = imagecolorallocate($im, 128, 128, 128);
+  $fg = imagecolorallocate($im, 64, 64, 64);
+
+  imagefill($im, 0, 0, $bg);
+
+  for ($i = 0; $i < 6; $i++) {
+    // vertical
+    imagefilledrectangle($im, $i * ($celldim + $bord), 0,
+                         $i * ($celldim + $bord) + 1, $height, $fg);
+    if ($i < 5) {
+      // horizontal
+      imagefilledrectangle($im, 0, $i * ($celldim + $bord),
+                           $width, $i * ($celldim + $bord) + 1, $fg);
+    } else {}
+  }
+
+  imagejpeg($im, "resource/grid.jpg");
+
+  imagecolordeallocate($im, $bg);
+  imagecolordeallocate($im, $fg);
+
+  imagedestroy($im);
+  ?>
+#+END_SRC
+
+
+** Draw the highlight square
+
+#+BEGIN_SRC php :tangle scripts/highlightsquare.php
+  <?php
+  $celldim = 180;
+  $bord = 2;
+
+  $im = imagecreatetruecolor($celldim + 2 * $bord,
+                             $celldim + 2 * $bord);
+  $bg = imagecolorallocate($im, 128, 128, 128);
+  $fg = imagecolorallocate($im, 0, 255, 0);
+
+  imagefill($im, 0, 0, $fg);
+  imagefilledrectangle($im, 2, 2, 180, 180, $bg);
+
+  chdir(__DIR__);
+  imagejpeg($im, "../resource/highlight.jpg");
+
+  imagecolordeallocate($im, $bg);
+  imagecolordeallocate($im, $fg);
+
+  imagedestroy($im);
+  ?>
+#+END_SRC
+
+
+** Define the stimulus sets
+
+#+BEGIN_SRC R
+  library("dplyr")
+  library("tidyr")
+  library("RSQLite")
+
+  get_fillers <- function(x, fillers) {
+      fills <- fillers[x[["fbeg"]]:x[["fend"]]]
+      data_frame(Role = paste0("Filler_", seq_along(fills)),
+                 Image = fills)
+  }
+
+  con <- dbConnect(SQLite(), "EESP3.db")
+
+  fillers <- list.files("experiment_stimuli/Filler_items") %>%
+      sub("\\.[A-Za-z]{3}$", "", .) %>% sample()
+  tlist <- read.csv("experiment_stimuli/stimuli_list.csv", stringsAsFactors = FALSE)
+  all_tpics <- c(t(as.matrix(tlist)))
+
+  all_files <- list.files("experiment_stimuli/Stimuli_EESP3_Draft1")
+
+  stopifnot(length(unique(all_tpics)) == length(all_tpics))
+  setdiff(all_tpics, all_files)
+  setdiff(all_files, all_tpics)
+
+  stopifnot(intersect(all_files, fillers) != 0)
+
+  targ_list <- tlist %>% sample_n(48) %>%
+      mutate(Prototypical = sub("\\.png$", "", Prototypical),
+             Abstract = sub("\\.png$", "", Abstract),
+             Foil = sub("\\.png$", "", Foil),
+             ItemID = row_number()) %>%
+      rename(Target = Prototypical,
+             Competitor = Abstract) %>%
+      gather(Role, Image, -ItemID)
+
+  item_info <- data_frame(ItemID = 1:48,
+                          IGroup = rep(1:4, each = 12),
+                          NFill = rep(rep(7:10, each = 3), times = 4),
+                          fend = cumsum(NFill),
+                          fbeg = fend - NFill + 1)
+
+  filler_list <- item_info %>%
+      group_by(ItemID) %>%
+      do(get_fillers(., fillers)) %>%
+      ungroup()
+
+  item_list <- bind_rows(targ_list, filler_list) %>%
+      arrange(ItemID, Role)
+
+  dbWriteTable(con, "ItemGroups", item_info %>%
+                   select(-fbeg, -fend) %>%
+                   as.data.frame(stringsAsFactors = FALSE),
+               append = FALSE)
+
+  dbWriteTable(con, "StimulusSets", item_list %>% as.data.frame(),
+               append = FALSE)
+#+END_SRC
+
+** Update the stimsets (after fillers have been established)
+
+#+BEGIN_SRC R
+  library("dplyr")
+  library("tidyr")
+  library("RSQLite")
+
+  con <- dbConnect(SQLite(), "EESP3.db")
+
+  tlist <- read.csv("experiment_stimuli/stimuli_list.csv", stringsAsFactors = FALSE)
+  all_tpics <- c(t(as.matrix(tlist)))
+
+  all_files <- list.files("experiment_stimuli/Stimuli_EESP3")
+
+  fillers <- list.files("experiment_stimuli/Filler_items") %>%
+      sub("\\.[A-Za-z]{3}$", "", .)
+
+  stopifnot(length(unique(all_tpics)) == length(all_tpics))
+  setdiff(all_tpics, all_files)
+  setdiff(all_files, all_tpics)
+
+  stimsets <- dbReadTable(con, "StimulusSets")
+
+  fillers_unused <-
+      setdiff(fillers,
+              stimsets %>% filter(grepl("^Filler", Role )) %>% `[[`("Image"))
+
+  nonfiller <- stimsets %>%
+      filter(!grepl("^Filler", Role))
+
+  fill_only <- stimsets %>%
+      filter(grepl("^Filler", Role))
+
+  new_itms <- tlist %>%
+      as.matrix() %>%
+      sub("\\.png", "", .) %>%
+      as.data.frame(stringsAsFactors = FALSE) %>%
+      rename(Target = Prototypical, Competitor = Abstract) %>%
+      mutate(old_id = row_number()) %>%
+      gather(Role, Image, -old_id)
+
+  matchup <- filter(new_itms, Role == "Target") %>%
+      inner_join(stimsets %>% filter(Role == "Target"), "Image") %>%
+      select(ItemID, old_id)
+
+  fixed <- new_itms %>% inner_join(matchup) %>%
+      select(ItemID, Role, Image) %>%
+      bind_rows(fill_only) %>%
+      arrange(ItemID)
+
+  ## stimsets[["Image"]] <- sub("^calendar_office", "lighter_flame", stimsets[["Image"]])
+  ## stimsets[["Image"]] <- sub("^calendar_advent", "lighter_noflame", stimsets[["Image"]])
+  ## stimsets[["Image"]] <- sub("^waldo_foil", "flask_foil", stimsets[["Image"]])
+  ## stimsets[["Image"]] <- sub("^chopsticks_filler$", sample(fillers_unused, 1), stimsets[["Image"]])
+  ## stimsets[["Image"]] <- sub("^Iphone_filler", sample(fillers_unused, 1), stimsets[["Image"]])
+
+  dbWriteTable(con, "StimulusSets", fixed %>% as.data.frame(stringsAsFactors),
+               append = FALSE, overwrite = TRUE)
+#+END_SRC
+
+
+** Events and watches (copy from EESP2)
+
+#+BEGIN_SRC R
+  library("RSQLite")
+
+  con <- dbConnect(SQLite(), dbname = "EESP2.db")
+
+  evt <- dbReadTable(con, "Event")
+  evt_arg <- dbReadTable(con, "EventArgs")
+
+  wat <- dbReadTable(con, "Watch")
+#+END_SRC
+
+
+* Prepare the stimulus images
+
+** Do all in one big batch script
+
+#+BEGIN_SRC sh :tangle scripts/edit_pictures.sh :shebang "#!/bin/bash"
+  scripts/move_images.sh
+  R --vanilla < scripts/squareoff.R
+  scripts/resize.sh
+  scripts/to_jpg.sh
+  php scripts/stimset_review.php
+#+END_SRC
+
+** Put all the files in the right places
+
+- and make sure they are pngs
+
+#+BEGIN_SRC sh :tangle scripts/move_images.sh :shebang "#!/bin/bash"
+  mkdir -p tmpstim
+  for f in experiment_stimuli/Filler_items/*.jpg experiment_stimuli/Filler_items/*.png experiment_stimuli/Stimuli_EESP3/*.png experiment_stimuli/Stimuli_EESP3/*.jpg
+  do
+      b=`basename $f .png`
+      convert $f tmpstim/$b.png
+  done
+#+END_SRC
+
+** Square off pictures
+
+#+BEGIN_SRC R :tangle scripts/squareoff.R
+  todo <- list.files("tmpstim", 
+                     pattern=".png$", full.names=TRUE)
+
+  ff <- lapply(todo, function(x) {
+      f1 <- system(paste("identify -format '%w %h'", x), intern=TRUE)
+        f2 <- as.numeric(strsplit(f1, " ")[[1]])
+        return(list(fname=x, dim=f2))
+    })
+
+  gg <- unlist(lapply(ff, function(x) {
+    dims <- x$dim
+    dimdiff <- round((dims[2]-dims[1])/2)
+    if (dimdiff < 0) {
+      fstr <- paste("0x", abs(dimdiff), sep="")
+    } else {
+      fstr <- paste(abs(dimdiff), "x0", sep="")
+    }
+    cmdstr <- paste("mogrify -bordercolor white", "-border", fstr, x$fname)
+    return(cmdstr)
+  }))
+
+  lapply(gg, system)
+#+END_SRC
+
+** Resize pictures
+
+#+BEGIN_SRC sh :shebang "#!/bin/bash" :tangle scripts/resize.sh
+  mkdir -p resource
+  for f in tmpstim/*.png
+  do
+      b=`basename $f .png`
+      convert $f -resize 180x180 resource/$b.bmp
+  done
+#+END_SRC
+
+** Make a folder with jpeg versions
+
+#+BEGIN_SRC sh :shebang "#!/bin/bash" :tangle scripts/to_jpg.sh
+  mkdir -p imgjpg
+  for f in resource/*.bmp
+  do 
+      b=`basename $f .bmp`
+      convert $f imgjpg/$b.jpg
+  done
+#+END_SRC
+
+** Generic PHP drawing functions
+
+#+NAME: gridfns
+#+BEGIN_SRC php
+  function load_stimset($iid, $dbh, $phase) {
+    $qry = "select StimulusSets.*, Pos from StimulusSets JOIN MainDisplays USING (ItemID, Role) WHERE Display = '".$phase."' AND ItemID=".$iid;
+    // $qry = "SELECT * FROM StimulusSets WHERE ItemID=".$iid;
+    $res = $dbh->query($qry);
+    $res->setFetchMode(PDO::FETCH_ASSOC); 
+    $i = 0;
+    while ($row = $res->fetch()) {
+      $itm[$row['Role']] = array($row['Image'], $row['Pos']);
+    }
+    $res = $dbh->query("SELECT Pos FROM MainDisplays WHERE Role='Crit' AND Display='".$phase."' AND ItemID=".$iid);
+    $res->setFetchMode(PDO::FETCH_ASSOC);
+    $row = $res->fetch();
+    $p = $row['Pos'];
+    $res = $dbh->query("SELECT * FROM StimulusSets WHERE (Role = 'Competitor' OR Role = 'Foil') AND ItemID=".$iid);
+    $res->setFetchMode(PDO::FETCH_ASSOC);
+    while ($row = $res->fetch()) {
+      $itm[$row['Role']] = array($row['Image'], $p);
+    }
+    return($itm);
+  }
+
+  function place_image($fname, $sqr, $im, $bord = 2) {
+    $size = 180;
+    if ($bord == 0) {
+      $size = 184;
+    } else {}
+    $img = imagecreatefromjpeg("../imgjpg/".$fname.".jpg");
+    $row = floor(($sqr - 1) / 5);
+    $col = ($sqr - 1) % 5;
+    imagecopy($im, $img, $bord + $col * 182, $bord + $row * 182,
+              0, 0, $size, $size);
+    imagedestroy($img);
+  }
+
+  function make_stimset_review_display($itm, $iid) {
+    $im = imagecreatefromjpeg("../resource/grid.jpg");
+    place_image($itm['Target'][0], 1, $im);
+    place_image($itm['Competitor'][0], 3, $im);
+    place_image($itm['Foil'][0], 5, $im);
+    $sqr = 11;  
+    foreach ($itm as $k => $v) {
+      if (($k != "Target") && ($k != "Competitor") && ($k != "Foil")) {
+        place_image($v[0], $sqr++, $im);
+      } else {}
+    }
+    imagejpeg($im, "../stimset_review/".str_pad($iid, 2, "0", STR_PAD_LEFT).".jpg");
+    imagedestroy($im);
+  }
+
+  function make_stimset_display($itm, $cond, $iid, $dir) {
+    $crit = $itm['Foil'];
+    if ($cond == "comp") {
+      $crit = $itm['Competitor'];
+    } else {}
+    $im = imagecreatefromjpeg("../resource/grid.jpg");
+    place_image("../resource/highlight", $itm['Target'][1], $im, 0);
+    place_image($itm['Target'][0], $itm['Target'][1], $im);
+    place_image($crit[0], $crit[1], $im);
+    // place_image($itm['Foil'][0], 5, $im);
+    foreach ($itm as $k => $v) {
+      if (($k != "Target") && ($k != "Competitor") && ($k != "Foil")) {
+        place_image($v[0], $v[1], $im);
+      } else {}
+    }
+    imagejpeg($im, "../".$dir."/".str_pad($iid, 2, "0", STR_PAD_LEFT).".jpg");
+    imagedestroy($im);
+  }
+#+END_SRC
+
+** Create displays for stimulus set review
+
+#+BEGIN_SRC php :tangle scripts/stimset_review.php
+  <?php
+  chdir(__DIR__);  
+  $dir = "sqlite:../EESP3.db";
+  $dbh = new PDO($dir) or die("couldn't open");
+
+  <<gridfns>>
+
+  for ($i = 1; $i <= 48; $i++) {
+    $itm = load_stimset($i, $dbh);
+    make_stimset_review_display($itm, $i);
+  }
+  ?>
+#+END_SRC
+
+
+* Create the displays
+
+- =StimulusSets= : 
+
+| ItemID | 1-48 unique stimset identifier                      |
+| Role   | Target, Competitor, Foil, Filler_X                  |
+| Image  | Name of image file (basename, no path or extension) |
+
+- =MainDisplays= : main display position configurations
+
+| ItemID  | 1-48 unique stimset identifier |
+| Display | Training or Test               |
+| Role    | Target, Crit, Filler_X         |
+| Pos     | position in the grid (1-20)    |
+
+- =ItemGroups= : groups of items for counterbalancing
+
+| ItemID | 1-48 unique stimset identifier |
+| IGroup | 1-4 which group of items       |
+| NFill  | number of filler images (7-10) |
+
+- =StimLists= : assignment of items to condition across 4 lists
+
+| VersID     | Which List Version (1-4)                 |
+| ItemID     | 1-48 unique stimset id                   |
+| Similarity | Low or high                              |
+| ShiftDir   | Singleton_Contrast or Contrast_Singleton |
+
+- =ListVers= : which 'master' stimlist each list is assigned to
+
+| ListID | ListID (1 - 36)                                          |
+| VersID | 1 - 4 ID of master stimulus list                         |
+| CB     | counterbalancing order; 1 = low- > high, 2 = high -> low |
+
+** Create prototypes and novel arrangements for each grid
+
+#+BEGIN_SRC R
+  library("dplyr")
+  library("RSQLite")
+
+  to_row <- function(x) floor((x - 1) / 5) + 1
+  to_col <- function(x) (x - 1) %% 5 + 1
+
+  configure_main_displays <- function(x) {
+      calc_cb_dist <- function(y1, y2) { # cb = city block
+          tloc <- c(to_row(y1), to_col(y1))
+          cloc <- c(to_row(y2), to_col(y2))
+          sum(abs(tloc - cloc))        
+      }
+      test <- data_frame(Display = "Test",
+                 Role = c("Target", "Crit",
+                     paste0("Filler_", seq_len(x[["NFill"]]))))
+      cb_dist <- 0
+      ## city-block distance between target and crit must be >= 4
+      samp <- rep(NA_integer_, nrow(test))
+      while (cb_dist < 4) {
+          samp[] <- sample(1:20, nrow(test))
+          cb_dist <- calc_cb_dist(samp[1], samp[2])
+      }
+      test[["Pos"]] <- samp
+      remaining <- setdiff(1:20, test[["Pos"]])
+      ## target in training trial should be an unoccupied square in test
+      tloc2 <- sample(remaining, 1)
+      newsq <- sample(setdiff(remaining, tloc2), ceiling(nrow(test) / 2) - 1)
+      newsq2 <- sample(setdiff(1:20, c(tloc2, newsq)), nrow(test) - length(newsq) - 1)
+      oth <- sample(c(newsq, newsq2))
+      samp[] <- c(tloc2, oth)
+      ## at least half of the squares at test were previously empty
+      train <- test %>%
+          mutate(Display = "Train",
+                 Pos = samp)
+      stopifnot(length(train[["Pos"]]) == length(unique(train[["Pos"]])))
+      bind_rows(train, test)
+  }
+
+  con_d <- src_sqlite("EESP3.db")
+  con <- dbConnect(SQLite(), "EESP3.db")
+
+  igroups <- tbl(con_d, "ItemGroups") %>% collect()
+
+  main_displays <- igroups %>%
+      group_by(ItemID) %>%
+      do(configure_main_displays(.))
+
+  dbWriteTable(con, "MainDisplays", main_displays %>%
+                   as.data.frame(stringsAsFactors = FALSE),
+               overwrite = TRUE)
+#+END_SRC
+
+** Assign individual displays to condition across lists
+
+#+BEGIN_SRC R
+  library("dplyr")
+  library("RSQLite")
+  library("funfact") # http://github.com/dalejbarr/funfact
+
+  con_d <- src_sqlite("EESP3.db")
+  con <- dbConnect(SQLite(), "EESP3.db")
+
+  linfo <- stim_lists(list(ivs = list(Similarity = c("High", "Low"),
+                               ShiftDir = c("Singleton_Contrast",
+                                   "Contrast_Singleton")),
+                           n_item = 48)) %>%
+           rename(ItemID = item_id, VersID = list_id)
+
+  dbWriteTable(con, "StimLists",
+               linfo, append = FALSE)
+#+END_SRC
+
+** Assign sessions to lists
+
+#+BEGIN_SRC R
+  library("dplyr")
+  library("RSQLite")
+
+  con_d <- src_sqlite("EESP3.db")
+  con <- dbConnect(SQLite(), "EESP3.db")
+
+  dbGetQuery(con, "DELETE FROM Session WHERE SessionID != 999")
+  dbGetQuery(con, "DELETE FROM Subject WHERE SessionID != 999")
+
+  listvers <- data_frame(VersID = rep(1:4, 9),
+                         CB = c(rep(rep(1:2, each = 4), 4),
+                                rep(1:2, each = 2))) %>%
+     mutate(ListID = sample(row_number())) %>%
+     arrange(ListID) %>%
+     select(ListID, VersID, CB)
+
+  sess <- data_frame(SessionID = 1:36,
+                     ExpID = rep(1, 36),
+                     ListID = 1:36,
+                     Date = "2015-11-23 00:00:00",
+                     Completion = "NO_DATA",
+                     Host = NA_character_,
+                     Comment = NA_character_,
+                     Seed = NA_integer_)
+
+  subj <- data_frame(SubjID = 1:36,
+                     SessionID = 1:36,
+                     SubjRoleID = rep(1, 36),
+                     Gender = rep("X", 36),
+                     Comment = NA_character_)
+
+  dbWriteTable(con, "ListVers", listvers %>%
+                   as.data.frame(stringsAsFactors = FALSE),
+               overwrite = TRUE)
+
+  dbWriteTable(con, "Session", sess %>%
+                   as.data.frame(stringsAsFactors = FALSE),
+               overwrite = FALSE, append = TRUE)
+
+  dbWriteTable(con, "Subject", subj %>%
+                   as.data.frame(stringsAsFactors = FALSE),
+               overwrite = FALSE, append = TRUE)
+#+END_SRC
+
+** Create training grids varying on prototypes
+
+This part invovles the sequencing of trials for the experiment.  It's
+complicated.
+
+Each participant completes 48 "series" of trials, with each having
+7-10 patterns (6-9 training + 1 test).  Twenty-four of these series
+are in the low-similarity condition, and 24 in the high-similarity
+condition.  The low-similarity trials are all blocked together, as are
+the high-similarity trials.
+
+Here is where things get tricky.  The way that we do things is that we
+divide up each of these two blocks into six training/test "sections",
+and within each section, we intermingle the training and test trials
+from four different series; for all but the final section, we will
+also interleave four of the training trials from each of the next four
+series.
+
+# DIAGRAM OF TEST PHASES (sections 1-11)
+#
+# position [ 123456789012345 ]
+#              T.. T.. T.. T
+# series       122 233 344 4
+#
+# key: T = test
+#      . = spot where final training occurs
+# remaining slots have 3-4 training trials from series in next section      
+
+Sections 1-11 of the 12 sections were built as follows.  First, the last
+fifteen trials of the section were built.  These last fifteen trials
+consisted of: (A) the four test trials from the 4 series, at serial
+positions 3, 7, 11, and 15; (B) the last training trial for three of
+the four series, with one at position 4 or 5 (random); another at
+position 8 or 9 (random); and the third at position 12 or 13 (random);
+(C) the 3rd and 4th training trials for each of the four series coming
+up in the next block, filling in the remaining empty slots among the
+15 at random.  The remaining training trials from the current four
+series in this section, as well as the first and second training
+trials from the series in the next section were then randomly shuffled
+to form the first part of the block.
+
+# DIAGRAM OF TEST PHASE (section 12)
+#
+# position [ 123456789 ]
+#            T.  T..TT
+# series     123423434
+# 
+# key: T = test
+#      . = spot where final training occurs
+# remaining slots have 3-4 training trials from series in next section      
+
+Section 6 was built like the other sections, except being the last
+section, there were no new training trials from the next section to
+slot in.  The last 9 trials were built first, with test trials for
+each of the four series happening at serial positions 1, 5, 8, and 9.
+Positions 6 and 7 had the last two training trials for the series
+tested at positions 8 and 9; position 2 had the last training trial
+for the series tested at 5; and positions 3 and 4 had the second to
+last training trials for the series tested at 8 and 9.
+
+#+BEGIN_SRC R
+  library("dplyr")
+  library("RSQLite")
+
+  make_block <- function(ix, bx) {
+      this_group <- filter(bx, Group == ix) %>% sample_n(4)
+      if (ix == 6) {
+          next_group <- NULL
+          test_phase <- vector("integer", 9)
+          test_phase[c(1, 5, 8, 9)] <- this_group[["ItemID"]]
+          test_phase[6:7] <- this_group[["ItemID"]][3:4]
+          test_phase[2] <- this_group[["ItemID"]][2]
+          test_phase[3:4] <- this_group[["ItemID"]][3:4]
+          train_n <- c(sample(2:5, 1), sample(2:4, 1),
+                       sample(2:3, 1), sample(2:3, 1))
+          training <- sample(rep(this_group[["ItemID"]], train_n))
+      } else {
+          test_phase <- vector("integer", 15)
+          next_group <- filter(bx, Group == (ix + 1)) %>% sample_n(4)
+          test_phase[c(3, 7, 10, 15)] <- this_group[["ItemID"]]
+          test_phase[sample(4:5, 1)] <- this_group[["ItemID"]][2]
+          test_phase[sample(8:9, 1)] <- this_group[["ItemID"]][3]
+          test_phase[sample(12:13, 1)] <- this_group[["ItemID"]][4]
+          test_phase[which(test_phase == 0)] <-
+            sample(rep(next_group[["ItemID"]], 2), 8, FALSE)
+          lower <- 4
+          if (ix == 1) {
+              lower <- 0
+          } else {}
+          train_n <- c(sample((6 - lower):(9 - lower), 1),
+                       sample((6 - lower):(8 - lower), 1),
+                       sample((6 - lower):(8 - lower), 1),
+                       sample((6 - lower):(8 - lower), 1))
+          training <- sample(c(rep(this_group[["ItemID"]], train_n),
+            rep(next_group[["ItemID"]], 2)))
+      }
+      c(training, test_phase)
+  }
+
+  get_item_info <- function(x) {
+      cx <- x %>% mutate(Ord = row_number())
+      lastrow <- max(cx[["Ord"]])
+      tord <- c("Train", "Test")
+      if (cx[["Similarity"]][1] == "High") {
+          tord <- c("Test", "Test")
+      } else {}
+      ford <- c("Foil", "Competitor")
+      if (cx[["ShiftDir"]][1] == "Contrast_Singleton") {
+          ford <- c("Competitor", "Foil")
+      } else {}
+      cx[["Pattern"]] <- rep(tord, c(lastrow - 1, 1))
+      cx[["Variation"]] <- rep(c(TRUE, FALSE), c(lastrow - 1, 1))
+      cx[["Crit"]] <- rep(ford, c(lastrow - 1, 1))
+      cx
+  }
+
+  make_list_items <- function(x) {
+      lvers <- dbGetQuery(con,
+                 paste0("SELECT VersID, CB FROM ListVers WHERE ListID = ",
+                        x[["ListID"]]))
+      listinf <- dbGetQuery(con,
+                            paste0("SELECT * FROM StimLists WHERE VersiD = ",
+                                   lvers[["VersID"]])) %>%
+         arrange(Similarity, ShiftDir)
+      lchunks <- split(listinf, listinf[["Similarity"]])
+      ivec <- 1:2
+      if (lvers[["CB"]] == 1) {
+          ivec <- 2:1
+      } else {}
+      lblocks <- lapply(lchunks[ivec], function(xx) {
+          xx[["Group"]] <- c(sample(rep(1:6, 2)),
+                             sample(rep(1:6, 2)))
+          xx %>% arrange(Group)
+      })
+      disp_count <- sample(7:10, 48, TRUE)
+      ff <- lapply(lblocks, function(bx) {
+          lapply(1:6, make_block, bx)
+      })
+      dat <- data_frame(ItemID = c(unlist(ff[[1]]), 999999L,
+                                   unlist(ff[[2]]))) %>%
+         mutate(OrderConstraint = row_number())
+      ## cx <- dat %>% inner_join(listinf, "ItemID") %>%
+      ##   filter(ItemID == 43)
+      dat %>% inner_join(listinf, "ItemID") %>%
+        group_by(ItemID) %>% do(get_item_info(.)) %>% ungroup() %>%
+        select(-VersID) %>%
+        arrange(OrderConstraint)
+  }
+
+  add_break <- function(x) {
+      breakpoint <- as.integer(rle(x[["Similarity"]])$lengths[1] + 1)
+      bind_rows(x, data_frame(ListID = x[["ListID"]][1],
+                              ItemCellID = 999999L,
+                              OrderConstraint = breakpoint,
+                              Similarity = x[["Similarity"]][1],
+                              PhaseID = 1L)) %>%
+        arrange(OrderConstraint) %>% select(-Similarity)
+  }
+
+  ## because we don't want them to know where to look to find the foil
+  vary_positions <- function(x) {
+      targ_ix <- which(x[["Role"]] == "Target")
+      tfoil_ix <- which(x[["Role"]] %in% c("Foil", "Competitor"))
+      fill_ix <- setdiff(seq_len(nrow(x)), tfoil_ix)
+      stopifnot(length(tfoil_ix) == 1)
+      new_pos_ix <- sample(setdiff(c(tfoil_ix, fill_ix), targ_ix), 1, FALSE)
+      old_tfoil <- x[["Pos"]]
+      x[["Pos"]][tfoil_ix] <- old_tfoil[new_pos_ix]
+      x[["Pos"]][new_pos_ix] <- old_tfoil[tfoil_ix]
+      x
+  }
+
+  ## con_d <- src_sqlite("EESP3.db")
+  con <- dbConnect(SQLite(), "EESP3.db")
+
+  lists <- data.frame(ListID = 1:36,
+                      Name = as.character(1:36),
+                      Excluded = 0L)
+
+  dbGetQuery(con, "DELETE FROM List WHERE ListID != 999")
+  dbWriteTable(con, "List", lists,
+               append = TRUE, overwrite = FALSE)
+
+  litems <- lists %>% group_by(ListID) %>%
+    do(make_list_items(.)) %>% ungroup() %>%
+    arrange(ListID, OrderConstraint) %>%
+    mutate(ItemCellID = row_number())
+
+  # | Cell | ShiftDir | Distortion |
+  # |------+----------+------------|
+  # |    1 | SC       | L          |
+  # |    2 | SC       | H          |
+  # |    3 | CS       | L          |
+  # |    4 | CS       | H          |
+
+  cells <- data_frame(Cell = 1:4,
+                      Variation = rep(FALSE, 4),
+                      ShiftDir = rep(c("Singleton_Contrast",
+                                       "Contrast_Singleton"), each = 2),
+                      Similarity = rep(c("Low", "High"), times = 2))
+
+  cond <- bind_rows(cells,
+                    cells %>% mutate(Cell = 0L, Variation = TRUE))
+
+  dbGetQuery(con, "DELETE FROM Condition")
+  dbWriteTable(con, "Condition", cond %>%
+               filter(Cell > 0) %>%
+               mutate(Type = "W",
+                      Value = paste(ShiftDir, Similarity, sep = "_")) %>%
+                          select(CellID = Cell, Type, Value) %>%
+                          as.data.frame(stringsAsFactors = FALSE),
+               append = TRUE)
+                           
+
+  items <- litems %>%
+     mutate(Item = sprintf("%02d_%02d", ItemID, Ord),
+            TemplateID = 1L) %>%
+    inner_join(cond, c("Variation", "ShiftDir", "Similarity")) %>%
+    arrange(ListID, OrderConstraint) %>%
+    select(ItemCellID, Item, Cell, TemplateID)
+  items2 <- bind_rows(items,
+                      data_frame(ItemCellID = 999999,
+                                 Item = "break",
+                                 Cell = 0L,
+                                 TemplateID = 2L))
+
+  dbGetQuery(con, "DELETE FROM Item")
+  dbWriteTable(con, "Item",
+               items2 %>% as.data.frame(stringsAsFactors = FALSE),
+               append = TRUE)
+
+  lord <- litems %>%
+    select(ListID, ItemCellID, OrderConstraint, Similarity) %>%
+    mutate(PhaseID = 1L) %>%
+    group_by(ListID) %>%
+    do(add_break(.)) %>% ungroup() %>%
+    mutate(ListOrderID = row_number()) %>%
+    select(ListOrderID, ListID, ItemCellID, OrderConstraint, PhaseID)
+
+  dbGetQuery(con, "DELETE FROM ListOrder WHERE ListID != 999")
+  dbWriteTable(con, "ListOrder",
+               lord %>% as.data.frame(stringsAsFactors = FALSE),
+               append = TRUE)
+
+  stimsets <- dbReadTable(con, "StimulusSets")
+  maindisp <- dbReadTable(con, "MainDisplays")
+
+  ## litems.. now make the AOI table for the individual items
+  dir_disp <- litems %>%
+    select(ItemCellID, ItemID,  Pattern, Variation, Crit) %>%
+    inner_join(maindisp, c(ItemID="ItemID", Pattern="Display"))
+
+  dir_disp[["Role"]] <- ifelse(dir_disp[["Role"]] == "Crit",
+                               dir_disp[["Crit"]], dir_disp[["Role"]])
+
+  mat_disp <- litems %>%
+    select(ItemCellID, ItemID, Crit) %>%
+    inner_join(maindisp %>% filter(Display == "Test"), "ItemID") %>%
+    mutate(Pos = 21 - Pos)
+
+  mat_disp[["Role"]] <- ifelse(mat_disp[["Role"]] == "Crit",
+                               mat_disp[["Crit"]], mat_disp[["Role"]])
+
+  mat_aoi <- mat_disp %>%
+     inner_join(stimsets, c("ItemID", "Role")) %>%
+     mutate(Resource = paste0(Image, ".bmp")) %>%
+     select(-Display, -Crit, -Image) %>%
+     mutate(x1 = 1082 + ((Pos - 1) %% 5) * 182,
+            y1 = 18 + floor((Pos - 1) / 5) * 182) %>%
+     select(ID = ItemCellID, Name = Role, Resource, x1, y1)
+
+  dir_aoi <- dir_disp %>%
+     inner_join(stimsets, c("ItemID", "Role")) %>%
+     mutate(Resource = paste0(Image, ".bmp")) %>%
+     select(-Pattern, -ItemID, -Crit, -Image)
+
+  dir_vary <- filter(dir_aoi, Variation)
+  dir_no_vary <- filter(dir_aoi, !Variation)
+
+  dir_tweak <- dir_vary %>%
+    group_by(ItemCellID) %>%
+    do(vary_positions(.))
+
+  dir_aoi2 <- bind_rows(dir_tweak,
+                        dir_no_vary) %>%
+       mutate(x1 = 58 + ((Pos - 1) %% 5) * 182,
+              y1 = 18 + floor((Pos - 1) / 5) * 182) %>%
+     select(ID = ItemCellID, Name = Role, Resource, x1, y1)
+
+  all_aoi <- bind_rows(dir_aoi2,
+                       mat_aoi) %>%
+     mutate(Layer = 3L)
+
+  htarg <- filter(dir_aoi2, Name == "Target") %>%
+     mutate(Resource = "highlight.bmp",
+            Name = "Highlight",
+            x1 = x1 - 2, y1 = y1 - 2,
+            Layer = 2L)
+
+  aoi <- bind_rows(all_aoi,
+                   htarg) %>%
+    mutate(AOIID = row_number(),
+           Link = "itemcell") %>%
+    select(AOIID, Link, ID, Name, Resource, x1, y1, Layer)
+
+  dbGetQuery(con, "DELETE FROM AOI WHERE Link = 'itemcell'")
+  firstAOIID <- dbGetQuery(con, "SELECT MAX(AOIID) AS m FROM AOI") %>%
+      `[[`("m")
+
+  dbWriteTable(con, "AOI", aoi %>%
+                   mutate(AOIID = AOIID + firstAOIID) %>%
+                   as.data.frame(stringsAsFactors = FALSE),
+               append = TRUE)
+
+  dbDisconnect(con)
+  ## matcher (56. 16)
+  ## director (1080, 16)
+#+END_SRC
+
+** Add in resources (soundfile names)
+
+#+BEGIN_SRC R
+  library("RSQLite")
+
+  con <- dbConnect(SQLite(), dbname = "EESP3.db")
+
+  itm <- dbReadTable(con, "Item")
+
+  res <- itm %>%
+      filter(ItemCellID != 999999) %>%
+      mutate(Code = "SOUNDFILE",
+             Data = paste0(substr(Item, 1, 2), ".wav"),
+             ResID = row_number()) %>%
+      select(ResID, Code, ItemCellID, Data)
+
+  dbWriteTable(con, "Resource", res %>%
+                   as.data.frame(stringsAsFactors = FALSE),
+               append = TRUE)
+#+END_SRC
+
+** Visualize the displays
+
+#+BEGIN_SRC php :tangle scripts/make_stimset.php
+  <?php
+  chdir(__DIR__);
+  $dir = "sqlite:../EESP3.db";
+  $dbh = new PDO($dir) or die("couldn't open");
+
+  <<gridfns>>
+
+  for ($i = 1; $i <= 48; $i++) {
+    $itm = load_stimset($i, $dbh, "Test");
+    make_stimset_display($itm, "comp", $i, "test_comp");
+  }
+
+  for ($i = 1; $i <= 48; $i++) {
+    $itm = load_stimset($i, $dbh, "Train");
+    make_stimset_display($itm, "foil", $i, "train_foil");
+  }
+
+
+  for ($i = 1; $i <= 48; $i++) {
+    $itm = load_stimset($i, $dbh, "Train");
+    make_stimset_display($itm, "comp", $i, "train_comp");
+  }
+
+  for ($i = 1; $i <= 48; $i++) {
+    $itm = load_stimset($i, $dbh, "Test");
+    make_stimset_display($itm, "foil", $i, "test_foil");
+  }
+  ?>
+#+END_SRC
+
+
